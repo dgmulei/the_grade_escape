@@ -11,6 +11,34 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 load_dotenv()
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
+def setup_directories():
+    """Create necessary directories if they don't exist"""
+    dirs = ['input_images', 'analysis_output', 'feedback_output', 'validation_output']
+    for dir in dirs:
+        Path(dir).mkdir(exist_ok=True)
+
+def get_teacher_inputs():
+    """Prompt for assignment details"""
+    print("\nSetup your grading session:")
+    question = input("Enter assignment question: ")
+    print("\nEnter rubric points (one per line, empty line to finish):")
+    rubric = []
+    while True:
+        point = input()
+        if not point: break
+        rubric.append(point)
+    word_limit = int(input("\nEnter word limit for feedback: "))
+    return question, rubric, word_limit
+
+def display_results(filename: str, feedback: str, validation: dict):
+    """Display feedback and validation results"""
+    print(f"\nFeedback for {filename}:")
+    print(f"{feedback}")
+    print("\nValidation: ", end='')
+    for result in validation['validation_results'].values():
+        print('✅' if result == 'Y' else '❌', end='')
+    print()
+
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
@@ -26,10 +54,7 @@ def extract_json_values(content):
     rubric_points = {}
     for match in rubric_matches:
         key, value = match.groups()
-        if key in ["purpose_regenerate_nad", "fermentation_oxidizes_nadh", 
-                  "pyruvate_oxidizing_agent", "nad_needed_glycolysis", 
-                  "atp_impact_no_nad", "o2_role_etc"]:
-            rubric_points[key] = value == "true"
+        rubric_points[key] = value == "true"
     
     points_earned_pattern = r'"points_earned":\s*\[(.*?)\]'
     points_earned_match = re.search(points_earned_pattern, content, re.DOTALL)
@@ -53,24 +78,22 @@ def extract_json_values(content):
         "points_earned": points_earned
     }
 
-def process_academic_image(image_path):
+def process_academic_image(image_path, question, rubric_points):
     base64_image = encode_image(image_path)
     
-    prompt = '''Analyze this student response and return a JSON object with:
-{
+    # Create dynamic rubric JSON structure
+    rubric_json = {point: "true/false" for point in rubric_points}
+    
+    prompt = f'''Analyze this student response and return a JSON object with:
+{{
     "student_response": "verbatim text",
-    "teacher_score": "x/4",
-    "rubric_points": {
-        "purpose_regenerate_nad": true/false,
-        "fermentation_oxidizes_nadh": true/false,
-        "pyruvate_oxidizing_agent": true/false,
-        "nad_needed_glycolysis": true/false,
-        "atp_impact_no_nad": true/false,
-        "o2_role_etc": true/false
-    },
+    "teacher_score": "x/{len(rubric_points)}",
+    "rubric_points": {json.dumps(rubric_json, indent=4)},
     "misconceptions": ["list of errors"],
     "points_earned": ["list of earned rubric points"]
-}'''
+}}
+
+Question: {question}'''
 
     messages = [
         {
@@ -84,7 +107,7 @@ def process_academic_image(image_path):
     ]
     
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4-vision-preview",
         messages=messages,
         temperature=0,
         max_tokens=3000
@@ -100,39 +123,34 @@ def process_academic_image(image_path):
         logging.error(f"Failed to extract JSON values: {str(e)}")
         raise
 
-def generate_feedback(analysis_json: dict, config: ConfigLoader) -> str:
+def generate_feedback(analysis_json: dict, config: ConfigLoader, question: str, word_limit: int) -> str:
     preferences = config.get_preferences()
     
     prompt = f"""CONTEXT
-Question: Explain the purpose of fermentation and why it's not needed in the presence of oxygen.
-Rubric: - Purpose is to regenerate NAD+
-- Fermentation oxidizes NADH to form NAD+
-- Pyruvate acts as oxidizing agent
-- If NAD+ isn't regenerated, glycolysis wouldn't have an oxidizing agent
-- Without an oxidizing agent, glycolysis would shut down and no ATP would be made
-- In presence of oxygen, NADH normally gets oxidized by electron transport chain
+Question: {question}
+Rubric: {json.dumps(analysis_json['rubric_points'], indent=2)}
 
 Student Response: {analysis_json['student_response']}
-Word Limit: {preferences['word_limit']}
+Word Limit: {word_limit}
 
 INSTRUCTIONS
 1. Identify which rubric points student addressed/missed using the provided analysis:
 {json.dumps(analysis_json['rubric_points'], indent=2)}
 
-2. Generate ~50 word feedback that:
+2. Generate ~{word_limit} word feedback that:
    - Acknowledges correct understanding of rubric points
    - Targets 1-2 key missing concepts
    - Links to fundamental principles
    - Uses direct, personal language ("You explain...")
-   - Maintains precise biochemical terminology
+   - Maintains precise terminology
 
 STYLE GUIDANCE
 - Direct, conversational academic tone
 - Focus on understanding gaps
 - No study suggestions
-- Connect pathways to principles
+- Connect concepts to principles
 - Match examples like:
-"You explain the role of fermentation in regenerating NAD⁺ and oxygen's role in the electron transport chain well. To improve, clarify pyruvate's role during fermentation, specifically how it is reduced rather than oxidizing. Strengthening this detail will enhance your understanding of redox processes."
+"You explain the key concepts well. To improve, clarify [specific point], specifically how it relates to [principle]. Strengthening this detail will enhance your understanding."
 
 OUTPUT FORMAT
 - Feedback text"""
@@ -146,38 +164,165 @@ OUTPUT FORMAT
     
     return response.choices[0].message.content
 
-def process_directory(input_dir: str):
+def extract_validation_json(content: str) -> dict:
+    """Helper function to extract JSON from GPT response"""
+    content = re.sub(r'^```json\s*|\s*```$', '', content.strip())
+    
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                raise ValueError("Could not parse validation response as JSON")
+        raise ValueError("No JSON object found in response")
+
+def validate_feedback(feedback_text: str, rubric_points: dict, teacher_config: dict) -> dict:
+    """Validates feedback against 8 criteria using GPT-4."""
+    prompt = f"""CONTEXT
+Feedback to Validate: {feedback_text}
+
+Rubric Points Status:
+{json.dumps(rubric_points, indent=2)}
+
+Teacher Preferences:
+{json.dumps(teacher_config, indent=2)}
+
+INSTRUCTIONS
+Evaluate the feedback against these 8 criteria. For each criterion, respond with ONLY "Y" or "N".
+If responding with "N", provide a brief explanation why in the explanations section.
+
+VALIDATION CRITERIA:
+1. Is the feedback scientifically correct?
+2. Does the feedback address at least one rubric-aligned point?
+3. Does it avoid irrelevant praise or off-topic details?
+4. Is the feedback clear, concise, and professional?
+5. Does it guide actionable improvement?
+6. Is the feedback tone aligned with teacher preferences?
+7. Will this feedback encourage thoughtful improvement?
+8. Is the feedback easy to understand and logically structured?
+
+REQUIRED RESPONSE FORMAT:
+{{
+    "validation_results": {{
+        "scientifically_correct": "Y",
+        "rubric_aligned": "Y",
+        "avoids_irrelevant": "Y",
+        "clear_and_professional": "Y",
+        "actionable_guidance": "Y",
+        "tone_aligned": "Y",
+        "encourages_improvement": "Y",
+        "well_structured": "Y"
+    }},
+    "explanations": {{
+        "criterion_name": "explanation for N responses only"
+    }}
+}}
+
+Note: Respond ONLY with the JSON object above. No additional text or formatting."""
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=1000
+    )
+    
+    try:
+        content = response.choices[0].message.content
+        logging.info(f"Validation response: {content}")
+        
+        validation_data = extract_validation_json(content)
+        results = validation_data["validation_results"]
+        
+        # Calculate validation score
+        passed_count = sum(1 for result in results.values() if result == "Y")
+        validation_score = (passed_count / 8) * 100
+        
+        # Get failed criteria
+        failed_criteria = [
+            criterion for criterion, result in results.items()
+            if result == "N"
+        ]
+        
+        return {
+            "validation_results": results,
+            "failed_criteria": failed_criteria,
+            "validation_score": validation_score,
+            "explanations": validation_data.get("explanations", {})
+        }
+    except Exception as e:
+        logging.error(f"Validation error: {str(e)}")
+        logging.error(f"Raw response: {response.choices[0].message.content}")
+        raise
+
+def process_directory(input_dir: str, question: str, rubric_points: list, word_limit: int):
     config = ConfigLoader()
     input_path = Path(input_dir)
     
     # Create output directories
-    analysis_dir = Path("analysis_output")  # For OCR/analysis JSON files
-    feedback_dir = Path("feedback_output")  # For generated feedback text files
-    analysis_dir.mkdir(exist_ok=True)
-    feedback_dir.mkdir(exist_ok=True)
+    setup_directories()
     
-    for file_path in [f for ext in ['.jpg','.jpeg','.png'] 
-                      for f in input_path.glob(f'*{ext}')]:
+    # Process each image file
+    image_files = [f for ext in ['.jpg','.jpeg','.png'] 
+                   for f in input_path.glob(f'*{ext}')]
+    
+    if not image_files:
+        print("\nNo image files found in input_images directory!")
+        return
+    
+    print(f"\nProcessing {len(image_files)} assignments...")
+    
+    for file_path in image_files:
         try:
-            logging.info(f"Processing {file_path.name}")
+            print(f"\nProcessing {file_path.name}...")
             
             # Stage 1: OCR and Analysis
-            analysis_json = json.loads(process_academic_image(str(file_path)))
-            analysis_file = analysis_dir / f"{file_path.stem}_analysis.json"
+            analysis_json = json.loads(process_academic_image(str(file_path), question, rubric_points))
+            analysis_file = Path("analysis_output") / f"{file_path.stem}_analysis.json"
             with open(analysis_file, 'w') as f:
                 json.dump(analysis_json, f, indent=2)
-            logging.info(f"Saved analysis to {analysis_file}")
                 
             # Stage 2: Feedback Generation
-            feedback = generate_feedback(analysis_json, config)
-            feedback_file = feedback_dir / f"{file_path.stem}_feedback.txt"
+            feedback = generate_feedback(analysis_json, config, question, word_limit)
+            feedback_file = Path("feedback_output") / f"{file_path.stem}_feedback.txt"
             with open(feedback_file, 'w') as f:
                 f.write(feedback)
-            logging.info(f"Saved feedback to {feedback_file}")
+            
+            # Stage 3: Feedback Validation
+            validation_results = validate_feedback(
+                feedback_text=feedback,
+                rubric_points=analysis_json["rubric_points"],
+                teacher_config={
+                    "preferences": config.get_preferences(),
+                    "feedback_criteria": config.get_feedback_criteria()
+                }
+            )
+            
+            validation_file = Path("validation_output") / f"{file_path.stem}_validation.json"
+            with open(validation_file, 'w') as f:
+                json.dump(validation_results, f, indent=2)
+            
+            # Display results
+            display_results(file_path.name, feedback, validation_results)
             
         except Exception as e:
             logging.error(f"Failed to process {file_path.name}: {str(e)}")
+            print(f"\nError processing {file_path.name}. See logs for details.")
 
 if __name__ == "__main__":
-    input_dir = "input_images"
-    process_directory(input_dir)
+    try:
+        # Get teacher inputs
+        question, rubric_points, word_limit = get_teacher_inputs()
+        
+        # Process assignments
+        process_directory("input_images", question, rubric_points, word_limit)
+        
+    except KeyboardInterrupt:
+        print("\n\nGrading session interrupted by user.")
+        sys.exit(0)
+    except Exception as e:
+        logging.error(f"Application error: {str(e)}")
+        print("\nAn error occurred. Please check the logs for details.")

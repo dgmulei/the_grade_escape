@@ -1,0 +1,20 @@
+{
+    "tone": "direct, conversational academic tone",
+    "focus": "understanding gaps over praise",
+    "avoid": [
+        "study suggestions",
+        "irrelevant praise",
+        "off-topic details"
+    ],
+    "feedback_structure": [
+        "acknowledge correct understanding briefly",
+        "focus on 1-2 key missing concepts",
+        "link to fundamental principles"
+    ],
+    "preferred_phrases": [
+        "You explain...",
+        "You should clarify...",
+        "Consider..."
+    ],
+    "word_limit": 50
+}

@@ -1,0 +1,25 @@
+{
+    "rubric_evaluation": {
+        "evaluate_rubric_points": true,
+        "prioritize_critical_points": true,
+        "mark_as_missing": "if unclear or incorrect",
+        "special_rules": {
+            "last_point_must_for_full_credit": true
+        }
+    },
+    "validation_criteria": [
+        "Is the feedback scientifically correct?",
+        "Does the feedback address at least one rubric-aligned point?",
+        "Does it avoid irrelevant praise or off-topic details?",
+        "Is the feedback clear, concise, and professional?",
+        "Does it guide actionable improvement?",
+        "Is the feedback tone aligned with teacher preferences?",
+        "Will this feedback encourage thoughtful improvement?",
+        "Is the feedback easy to understand and logically structured?"
+    ],
+    "grading_notes": [
+        "Only give points for rubric alignment",
+        "Do not deduct points for errors",
+        "Use direct language to address missing points"
+    ]
+}

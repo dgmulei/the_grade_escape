@@ -1,9 +1,9 @@
 # The Grade Escape
 
-An automated feedback system for grading student assignments with OCR and GPT-4 Vision.
+An automated feedback system for grading student assignments with GPT-4o.
 
 ## Features
-- OCR processing of handwritten assignments
+- GPT-4o processing of handwritten assignments
 - Rubric-based analysis
 - Personalized feedback generation
 - Three-stage processing: analysis, feedback, and validation
@@ -48,6 +48,7 @@ python -m src.academic_processor
 3. Follow the CLI prompts:
    - Enter the assignment question
    - Input rubric points (one per line, empty line to finish)
+   - Enter grading notes (one per line, empty line to finish)
    - Specify word limit for feedback
 4. The system will process all assignments and display:
    - Individual feedback for each submission
@@ -56,7 +57,7 @@ python -m src.academic_processor
 
 ## Processing Stages
 1. **Analysis Stage**
-   - OCR processes handwritten assignments using GPT-4 Vision
+   - OCR processes handwritten assignments using GPT-4o
    - Generates detailed rubric analysis
    - Outputs: `analysis_output/*_analysis.json`
 
@@ -102,6 +103,9 @@ The system automatically validates generated feedback against:
 - Keyboard interrupt support (Ctrl+C) to stop processing
 
 ## Dependencies
-- OpenAI API (GPT-4 Vision)
+- OpenAI API with GPT-4o model access (IMPORTANT: System requires the GPT-4o model specifically)
 - Python 3.7+
 - python-dotenv
+
+## Model Compatibility
+This system is specifically designed to work with OpenAI's GPT-4o model. Using other models (including other GPT-4 variants) may result in errors or unexpected behavior. The model name is hardcoded to prevent issues with API model deprecations.

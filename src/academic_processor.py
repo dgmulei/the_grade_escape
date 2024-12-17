@@ -17,27 +17,90 @@ def setup_directories():
     for dir in dirs:
         Path(dir).mkdir(exist_ok=True)
 
+def print_section_header(title):
+    """Print a formatted section header"""
+    print("\n" + "="*50)
+    print(f" {title}")
+    print("="*50)
+
+def print_subsection(title):
+    """Print a formatted subsection header"""
+    print(f"\n{'-'*3} {title} {'-'*3}")
+
 def get_teacher_inputs():
     """Prompt for assignment details"""
-    print("\nSetup your grading session:")
-    question = input("Enter assignment question: ")
+    print_section_header("Setup Grading Session")
+    
+    # Get question
+    question = input("\nEnter assignment question: ")
+    
+    # Get rubric points
     print("\nEnter rubric points (one per line, empty line to finish):")
     rubric = []
     while True:
-        point = input()
+        point = input("> ")  # Added prompt indicator
         if not point: break
         rubric.append(point)
+    
+    # Get grading notes
+    print("\nEnter grading notes (one per line, empty line to finish):")
+    grading_notes = []
+    while True:
+        note = input("> ")  # Added prompt indicator
+        if not note: break
+        grading_notes.append(note)
+    
     word_limit = int(input("\nEnter word limit for feedback: "))
-    return question, rubric, word_limit
+    return question, rubric, grading_notes, word_limit
 
-def display_results(filename: str, feedback: str, validation: dict):
-    """Display feedback and validation results"""
-    print(f"\nFeedback for {filename}:")
-    print(f"{feedback}")
-    print("\nValidation: ", end='')
-    for result in validation['validation_results'].values():
+def display_results(filename: str, feedback: str, validation: dict, analysis_json: dict):
+    """Display feedback and validation results with improved formatting"""
+    print_section_header(f"Results for {filename}")
+    
+    # Display Score
+    print_subsection("Score")
+    print(f"Points: {analysis_json['teacher_score']}")
+    
+    # Display Points Earned
+    print_subsection("Points Earned")
+    for point in analysis_json['points_earned']:
+        print(f"✓ {point}")
+    
+    # Display Missing Points
+    missing_points = [point for point, earned in analysis_json['rubric_points'].items() if not earned]
+    if missing_points:
+        print_subsection("Missing Points")
+        for point in missing_points:
+            print(f"✗ {point}")
+    
+    # Display Misconceptions
+    if analysis_json['misconceptions']:
+        print_subsection("Misconceptions")
+        for misconception in analysis_json['misconceptions']:
+            print(f"• {misconception}")
+    
+    # Display Feedback
+    print_subsection("Generated Feedback")
+    print(feedback)
+    
+    # Display Validation Results
+    print_subsection("Validation")
+    results = validation['validation_results']
+    validation_score = validation['validation_score']
+    print(f"Quality Score: {validation_score:.0f}%")
+    print("Criteria Check:", end=' ')
+    for criterion, result in results.items():
         print('✅' if result == 'Y' else '❌', end='')
-    print()
+    print()  # New line after validation icons
+    
+    # Display any validation failures
+    if validation['failed_criteria']:
+        print("\nImprovement Needed:")
+        for criterion in validation['failed_criteria']:
+            explanation = validation['explanations'].get(criterion, "No explanation provided")
+            print(f"• {criterion}: {explanation}")
+    
+    print("\n" + "="*50)  # Section end separator
 
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
@@ -78,7 +141,7 @@ def extract_json_values(content):
         "points_earned": points_earned
     }
 
-def process_academic_image(image_path, question, rubric_points):
+def process_academic_image(image_path, question, rubric_points, grading_notes):
     base64_image = encode_image(image_path)
     
     # Create dynamic rubric JSON structure
@@ -93,7 +156,10 @@ def process_academic_image(image_path, question, rubric_points):
     "points_earned": ["list of earned rubric points"]
 }}
 
-Question: {question}'''
+Question: {question}
+
+Grading Notes:
+{chr(10).join(f"- {note}" for note in grading_notes)}'''
 
     messages = [
         {
@@ -107,7 +173,7 @@ Question: {question}'''
     ]
     
     response = client.chat.completions.create(
-        model="gpt-4-vision-preview",
+        model="gpt-4o",
         messages=messages,
         temperature=0,
         max_tokens=3000
@@ -123,26 +189,35 @@ Question: {question}'''
         logging.error(f"Failed to extract JSON values: {str(e)}")
         raise
 
-def generate_feedback(analysis_json: dict, config: ConfigLoader, question: str, word_limit: int) -> str:
+def generate_feedback(analysis_json: dict, config: ConfigLoader, question: str, grading_notes: list, word_limit: int) -> str:
     preferences = config.get_preferences()
     
     prompt = f"""CONTEXT
 Question: {question}
-Rubric: {json.dumps(analysis_json['rubric_points'], indent=2)}
+
+Rubric Points Status:
+{json.dumps(analysis_json['rubric_points'], indent=2)}
+
+Grading Notes:
+{chr(10).join(f"- {note}" for note in grading_notes)}
 
 Student Response: {analysis_json['student_response']}
 Word Limit: {word_limit}
 
 INSTRUCTIONS
-1. Identify which rubric points student addressed/missed using the provided analysis:
+1. Consider the grading notes when analyzing the response.
+
+2. Identify which rubric points student addressed/missed using the provided analysis:
 {json.dumps(analysis_json['rubric_points'], indent=2)}
 
-2. Generate ~{word_limit} word feedback that:
+3. Generate ~{word_limit} word feedback that:
    - Acknowledges correct understanding of rubric points
    - Targets 1-2 key missing concepts
    - Links to fundamental principles
    - Uses direct, personal language ("You explain...")
    - Maintains precise terminology
+   - Considers points-for-presence grading approach
+   - Addresses any required final point requirements
 
 STYLE GUIDANCE
 - Direct, conversational academic tone
@@ -156,7 +231,7 @@ OUTPUT FORMAT
 - Feedback text"""
 
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
         max_tokens=500
@@ -179,9 +254,14 @@ def extract_validation_json(content: str) -> dict:
                 raise ValueError("Could not parse validation response as JSON")
         raise ValueError("No JSON object found in response")
 
-def validate_feedback(feedback_text: str, rubric_points: dict, teacher_config: dict) -> dict:
+def validate_feedback(feedback_text: str, rubric_points: dict, teacher_config: dict, question: str, grading_notes: list) -> dict:
     """Validates feedback against 8 criteria using GPT-4."""
     prompt = f"""CONTEXT
+Question: {question}
+
+Grading Notes:
+{chr(10).join(f"- {note}" for note in grading_notes)}
+
 Feedback to Validate: {feedback_text}
 
 Rubric Points Status:
@@ -224,7 +304,7 @@ REQUIRED RESPONSE FORMAT:
 Note: Respond ONLY with the JSON object above. No additional text or formatting."""
 
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=1000
@@ -258,7 +338,7 @@ Note: Respond ONLY with the JSON object above. No additional text or formatting.
         logging.error(f"Raw response: {response.choices[0].message.content}")
         raise
 
-def process_directory(input_dir: str, question: str, rubric_points: list, word_limit: int):
+def process_directory(input_dir: str, question: str, rubric_points: list, grading_notes: list, word_limit: int):
     config = ConfigLoader()
     input_path = Path(input_dir)
     
@@ -273,20 +353,20 @@ def process_directory(input_dir: str, question: str, rubric_points: list, word_l
         print("\nNo image files found in input_images directory!")
         return
     
-    print(f"\nProcessing {len(image_files)} assignments...")
+    print_section_header(f"Processing {len(image_files)} Assignments")
     
     for file_path in image_files:
         try:
             print(f"\nProcessing {file_path.name}...")
             
             # Stage 1: OCR and Analysis
-            analysis_json = json.loads(process_academic_image(str(file_path), question, rubric_points))
+            analysis_json = json.loads(process_academic_image(str(file_path), question, rubric_points, grading_notes))
             analysis_file = Path("analysis_output") / f"{file_path.stem}_analysis.json"
             with open(analysis_file, 'w') as f:
                 json.dump(analysis_json, f, indent=2)
                 
             # Stage 2: Feedback Generation
-            feedback = generate_feedback(analysis_json, config, question, word_limit)
+            feedback = generate_feedback(analysis_json, config, question, grading_notes, word_limit)
             feedback_file = Path("feedback_output") / f"{file_path.stem}_feedback.txt"
             with open(feedback_file, 'w') as f:
                 f.write(feedback)
@@ -298,7 +378,9 @@ def process_directory(input_dir: str, question: str, rubric_points: list, word_l
                 teacher_config={
                     "preferences": config.get_preferences(),
                     "feedback_criteria": config.get_feedback_criteria()
-                }
+                },
+                question=question,
+                grading_notes=grading_notes
             )
             
             validation_file = Path("validation_output") / f"{file_path.stem}_validation.json"
@@ -306,7 +388,7 @@ def process_directory(input_dir: str, question: str, rubric_points: list, word_l
                 json.dump(validation_results, f, indent=2)
             
             # Display results
-            display_results(file_path.name, feedback, validation_results)
+            display_results(file_path.name, feedback, validation_results, analysis_json)
             
         except Exception as e:
             logging.error(f"Failed to process {file_path.name}: {str(e)}")
@@ -315,10 +397,10 @@ def process_directory(input_dir: str, question: str, rubric_points: list, word_l
 if __name__ == "__main__":
     try:
         # Get teacher inputs
-        question, rubric_points, word_limit = get_teacher_inputs()
+        question, rubric_points, grading_notes, word_limit = get_teacher_inputs()
         
         # Process assignments
-        process_directory("input_images", question, rubric_points, word_limit)
+        process_directory("input_images", question, rubric_points, grading_notes, word_limit)
         
     except KeyboardInterrupt:
         print("\n\nGrading session interrupted by user.")
